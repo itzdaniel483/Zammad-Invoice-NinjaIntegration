@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  zammad-invoiceninja:
+    build: .
+    image: zammad-invoiceninja-webhook:latest
+    container_name: zammad-invoiceninja-webhook
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - INVOICE_NINJA_URL=${INVOICE_NINJA_URL}
+      - INVOICE_NINJA_API_TOKEN=${INVOICE_NINJA_API_TOKEN}
