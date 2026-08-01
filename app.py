@@ -1,23 +1,56 @@
 import os
+import json
 import logging
-from flask import Flask, request, jsonify
+from datetime import datetime, timedelta
+from flask import Flask, request, jsonify, render_template
 import requests
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-INVOICE_NINJA_URL = os.environ.get('INVOICE_NINJA_URL', '').rstrip('/')
-INVOICE_NINJA_API_TOKEN = os.environ.get('INVOICE_NINJA_API_TOKEN', '')
+CONFIG_FILE = 'data/config.json'
 
-def get_or_create_client(email, name):
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        "invoice_ninja_url": "",
+        "invoice_ninja_api_token": "",
+        "hourly_rate": 50.0,
+        "due_date_days": 14,
+        "auto_send": False
+    }
+
+def save_config(config):
+    os.makedirs('data', exist_ok=True)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    return jsonify(load_config())
+
+@app.route('/api/settings', methods=['POST'])
+def update_settings():
+    config = request.json
+    save_config(config)
+    return jsonify({"message": "Settings saved successfully"})
+
+def get_or_create_client(config, email, name):
     headers = {
-        'X-Api-Token': INVOICE_NINJA_API_TOKEN,
+        'X-Api-Token': config['invoice_ninja_api_token'],
         'X-Requested-With': 'XMLHttpRequest',
         'Content-Type': 'application/json'
     }
+    base_url = config['invoice_ninja_url'].rstrip('/')
     
     # 1. Search for existing client
-    search_url = f"{INVOICE_NINJA_URL}/api/v1/clients?email={email}"
+    search_url = f"{base_url}/api/v1/clients?email={email}"
     resp = requests.get(search_url, headers=headers)
     resp.raise_for_status()
     data = resp.json()
@@ -26,40 +59,67 @@ def get_or_create_client(email, name):
         return data['data'][0]['id']
         
     # 2. Create client if not found
-    create_url = f"{INVOICE_NINJA_URL}/api/v1/clients"
+    create_url = f"{base_url}/api/v1/clients"
     payload = {
         "name": name,
-        "contacts": [{"email": email}]
+        "contacts": [{"email": email, "send_email": True}]
     }
     resp = requests.post(create_url, headers=headers, json=payload)
     resp.raise_for_status()
     return resp.json().get('data', {}).get('id')
 
-def create_invoice(client_id, ticket_number, ticket_title, time_amount):
+def create_and_send_invoice(config, client_id, ticket_number, ticket_title, time_amount):
     headers = {
-        'X-Api-Token': INVOICE_NINJA_API_TOKEN,
+        'X-Api-Token': config['invoice_ninja_api_token'],
         'X-Requested-With': 'XMLHttpRequest',
         'Content-Type': 'application/json'
     }
-    create_url = f"{INVOICE_NINJA_URL}/api/v1/invoices"
+    base_url = config['invoice_ninja_url'].rstrip('/')
+    
+    # Calculate Due Date
+    due_date = (datetime.now() + timedelta(days=int(config.get('due_date_days', 14)))).strftime('%Y-%m-%d')
+    
+    # Calculate cost (assuming time_amount is in minutes)
+    hourly_rate = float(config.get('hourly_rate', 50.0))
+    cost = hourly_rate / 60.0
+    
+    create_url = f"{base_url}/api/v1/invoices"
     payload = {
         "client_id": client_id,
+        "due_date": due_date,
         "line_items": [
             {
                 "product_key": f"Zammad Ticket #{ticket_number}",
                 "notes": ticket_title,
-                "cost": 1, # Rate can be adjusted here or passed via Zammad tags
+                "cost": cost,
                 "quantity": time_amount
             }
         ]
     }
+    
     resp = requests.post(create_url, headers=headers, json=payload)
     resp.raise_for_status()
-    return resp.json().get('data', {}).get('id')
+    invoice_data = resp.json().get('data', {})
+    invoice_id = invoice_data.get('id')
+    
+    # Auto-send if configured
+    if invoice_id and config.get('auto_send', False):
+        email_url = f"{base_url}/api/v1/emails"
+        email_payload = {
+            "entity": "invoice",
+            "entity_id": invoice_id,
+            "template": "invoice"
+        }
+        email_resp = requests.post(email_url, headers=headers, json=email_payload)
+        email_resp.raise_for_status()
+        logging.info(f"Auto-sent invoice {invoice_id}")
+        
+    return invoice_id
 
 @app.route('/webhook', methods=['POST'])
 def zammad_webhook():
-    if not INVOICE_NINJA_URL or not INVOICE_NINJA_API_TOKEN:
+    config = load_config()
+    if not config.get('invoice_ninja_url') or not config.get('invoice_ninja_api_token'):
         logging.error("Invoice Ninja credentials not configured.")
         return jsonify({"error": "Configuration missing"}), 500
 
@@ -69,18 +129,13 @@ def zammad_webhook():
         
     ticket = data['ticket']
     
-    # Check if closed
     if ticket.get('state') != 'closed':
         return jsonify({"message": "Ticket not closed"}), 200
         
-    # Check time accounting
-    # In Zammad webhooks, ticket data usually contains "time_unit" if time accounting is used.
     time_amount = ticket.get('time_unit', 0)
     if not time_amount or float(time_amount) <= 0:
         return jsonify({"message": "No time accounted to bill"}), 200
 
-    # Retrieve customer data from the webhook payload payload structure
-    # 'customer' usually exists in the root of the payload or under 'ticket'
     customer = data.get('customer') or ticket.get('customer', {})
     if not customer:
         customer_name = "Unknown Customer"
@@ -93,16 +148,17 @@ def zammad_webhook():
         customer_name = customer_email
 
     try:
-        client_id = get_or_create_client(customer_email, customer_name)
+        client_id = get_or_create_client(config, customer_email, customer_name)
         if not client_id:
             raise Exception("Failed to get or create client.")
             
-        invoice_id = create_invoice(client_id, ticket.get('number'), ticket.get('title'), float(time_amount))
-        logging.info(f"Created invoice {invoice_id} for ticket {ticket.get('number')}")
+        invoice_id = create_and_send_invoice(config, client_id, ticket.get('number'), ticket.get('title'), float(time_amount))
+        logging.info(f"Processed invoice {invoice_id} for ticket {ticket.get('number')}")
         return jsonify({"message": "Invoice created successfully", "invoice_id": invoice_id}), 200
     except Exception as e:
         logging.error(f"Failed to process billing: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
+    os.makedirs('data', exist_ok=True)
     app.run(host='0.0.0.0', port=5000)

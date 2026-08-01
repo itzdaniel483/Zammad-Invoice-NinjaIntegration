@@ -8,6 +8,8 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
-    environment:
-      - INVOICE_NINJA_URL=${INVOICE_NINJA_URL}
-      - INVOICE_NINJA_API_TOKEN=${INVOICE_NINJA_API_TOKEN}
+    volumes:
+      - invoiceninja-data:/app/data
+
+volumes:
+  invoiceninja-data:
