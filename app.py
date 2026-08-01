@@ -41,6 +41,24 @@ def update_settings():
     save_config(config)
     return jsonify({"message": "Settings saved successfully"})
 
+@app.route('/api/test', methods=['POST'])
+def test_connection():
+    config = request.json
+    headers = {
+        'X-Api-Token': config['invoice_ninja_api_token'],
+        'X-Requested-With': 'XMLHttpRequest',
+        'Content-Type': 'application/json'
+    }
+    base_url = config['invoice_ninja_url'].rstrip('/')
+    try:
+        resp = requests.get(f"{base_url}/api/v1/statics", headers=headers)
+        resp.raise_for_status()
+        return jsonify({"status": "success", "message": "Connection successful!"})
+    except requests.exceptions.HTTPError as e:
+        return jsonify({"status": "error", "message": f"HTTP {e.response.status_code}: {e.response.text}"}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
 def get_or_create_client(config, email, name):
     headers = {
         'X-Api-Token': config['invoice_ninja_api_token'],
@@ -111,7 +129,11 @@ def create_and_send_invoice(config, client_id, ticket_number, ticket_title, time
             "template": "invoice"
         }
         email_resp = requests.post(email_url, headers=headers, json=email_payload)
-        email_resp.raise_for_status()
+        try:
+            email_resp.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            logging.error(f"Email API Error: {email_resp.text}")
+            raise e
         logging.info(f"Auto-sent invoice {invoice_id}")
         
     return invoice_id

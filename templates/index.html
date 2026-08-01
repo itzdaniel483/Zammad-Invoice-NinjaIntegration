@@ -246,7 +246,10 @@
                     </label>
                 </div>
 
-                <button type="submit">Save Configuration</button>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 2rem;">
+                    <button type="button" id="testBtn" style="background-color: transparent; border: 1px solid var(--primary); color: var(--primary); margin-top: 0;">Test Connection</button>
+                    <button type="submit" style="margin-top: 0;">Save Configuration</button>
+                </div>
             </form>
         </div>
     </div>
@@ -282,8 +285,38 @@
                 body: JSON.stringify(payload)
             }).then(() => {
                 const toast = document.getElementById('toast');
+                toast.innerText = 'Settings saved successfully!';
+                toast.style.background = 'var(--success)';
                 toast.classList.add('show');
                 setTimeout(() => toast.classList.remove('show'), 3000);
+            });
+        });
+
+        // Test Connection
+        document.getElementById('testBtn').addEventListener('click', () => {
+            const payload = {
+                invoice_ninja_url: document.getElementById('invoice_ninja_url').value,
+                invoice_ninja_api_token: document.getElementById('invoice_ninja_api_token').value
+            };
+            const btn = document.getElementById('testBtn');
+            const originalText = btn.innerText;
+            btn.innerText = 'Testing...';
+            
+            fetch('/api/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(res => res.json())
+            .then(data => {
+                btn.innerText = originalText;
+                const toast = document.getElementById('toast');
+                toast.innerText = data.message;
+                toast.style.background = data.status === 'success' ? 'var(--success)' : '#ef4444';
+                toast.classList.add('show');
+                setTimeout(() => toast.classList.remove('show'), 5000);
+            }).catch(err => {
+                btn.innerText = originalText;
+                alert('Connection test failed: ' + err.message);
             });
         });
     </script>
